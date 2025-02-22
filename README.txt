@@ -35,7 +35,6 @@ Self-Preservation
 3 Process Monitoring: Restarts if terminated
 
 
-
 Testing Protocol:
 1 Run in isolated VM network
 2 Monitor with Wireshark/network tap
@@ -44,5 +43,24 @@ Testing Protocol:
 
 
 
+SURF THE WEB
+• Software is exposed by listening on a public IP/port and allowing inbound connections
+• For a Node.js file (e.g., index.js), create an HTTP server listening on a port (e.g., 80 or 3000)
+• Ensure any firewall/NAT port forwarding is configured to accept external traffic on that port
+• Example:
+npm init -y
+Install express: npm i express
+index.js:
+js
+Copy
+Edit
+const express = require('express');
+const app = express();
+app.get('/', (req, res) => {
+  res.send('Hello, public internet!');
+});
+app.listen(3000, () => console.log('Listening on 3000'));
+Run node index.js, then ensure port 3000 is accessible via your public IP
+• Users can connect by visiting http://yourPublicIP:3000/ in their browser
 
 
