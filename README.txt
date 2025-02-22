@@ -7,6 +7,21 @@
 
 
 
+[2025-02-22T03:37:01.276Z] Worm active on 169.254.8.1:3000
+
+
+
+process.env.PORT || 3000
+
+
+
+
+
+
+
+===============================================
+
+
 • Containerize the app (Dockerfile that installs dependencies and exposes port)
 • Deploy the container on a cloud platform (AWS, GCP, DigitalOcean, etc.)
 • Use orchestration (Kubernetes/ECS) to manage multiple instances
