@@ -1,0 +1,6 @@
+graph TD
+  A[Load Decoy Page] --> B[Run Script]
+  B --> C[Create RTCPeerConnection]
+  C --> D[Generate ICE Candidate]
+  D --> E[POST /infect with candidate IP]
+  E --> F[Server processes infection]
