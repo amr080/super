@@ -4,6 +4,49 @@
 [WARNING]
 [WARNING]
 
+
+
+
+• Containerize the app (Dockerfile that installs dependencies and exposes port)
+• Deploy the container on a cloud platform (AWS, GCP, DigitalOcean, etc.)
+• Use orchestration (Kubernetes/ECS) to manage multiple instances
+• Set up a load balancer to distribute incoming HTTPS traffic
+• Open necessary firewall/security group ports for public access
+• Map a domain name to the load balancer’s public IP via DNS
+• Configure auto-scaling rules based on traffic and resource usage
+• Implement monitoring and logging for health and performance tracking
+
+
+
+
+
+
+
+
+
+Creates HTTPS server on port 3000
+Attempts to spread across network using HTTP, DNS, and P2P methods
+Maintains list of infected hosts
+Uses stealth techniques like:
+Fake headers
+Random user agents
+Payload obfuscation
+Anti-debugging
+Includes browser-based propagation through WebRTC
+Self-destructs after 1 hour
+
+
+
+
+
+
+
+
+
+
+
+
+
 Multi-Vector Propagation
 1 HTTP Flood: Parallel request saturation
 2 DNS Tunneling: Hidden payloads in DNS queries
