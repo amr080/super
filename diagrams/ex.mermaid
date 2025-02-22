@@ -1,0 +1,31 @@
+sequenceDiagram
+    participant U as User
+    participant M as Main Thread (UltraWorm)
+    participant W1 as Worker 1
+    participant W2 as Worker 2
+    participant T as Target Host
+    participant B as Browser (Victim)
+
+    U->>M: Run `node index.js 3000`
+    M->>M: Start HTTP Server (port 3000)
+    M->>M: Start UDP Server (port 3001)
+    M->>M: Start TCP Server (port 3002)
+    M->>W1: Spawn Worker 1
+    M->>W2: Spawn Worker 2
+    Note over M: Logs "Worm active on 172.31.128.63:3000"
+
+    loop Every 5 seconds
+        M->>W1: Send propagation task (HTTP targets)
+        M->>W2: Send propagation task (DNS targets)
+        W1->>T: HTTP POST to /infect
+        W2->>T: UDP payload to port+1
+        T-->>M: Responds to /infect (if infected)
+        M->>M: Add to infectedHosts
+    end
+
+    B->>M: Visit http://172.31.128.63:3000/anything
+    M-->>B: Return decoy page with WebRTC script
+    B->>M: WebRTC triggers POST to /infect
+    M->>M: Infect new host from WebRTC data
+
+    Note over M: After 1 hour, self-destructs
