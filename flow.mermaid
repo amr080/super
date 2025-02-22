@@ -1,0 +1,14 @@
+graph TD
+  A[Start Server] --> B[Listen on Port 3000]
+  B --> C{Incoming Request?}
+  C -- GET / --> D[Return OK]
+  C -- POST /infect --> E[Receive Infection Payload]
+  E --> F[Call infectHost]
+  F --> G[Add Host to infectedHosts]
+  G --> H[saturateNetwork on target subnet]
+  H --> I[Invoke propagation httpPropagate]
+  C -- GET /payload --> J[Return Polymorphic Code]
+  B --> K[Activate Propagation Engine]
+  K --> L[Timer: networkRadar every 15s]
+  L --> M[Scan random subnets]
+  M --> H
